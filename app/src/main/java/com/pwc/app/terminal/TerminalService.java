@@ -6,16 +6,11 @@ import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Intent;
+import android.content.pm.ServiceInfo;
 import android.os.Build;
 import android.os.IBinder;
 import android.util.Log;
 
-/**
- * Foreground Service — กัน Android ฆ่า process ตอนสลับแอพ / จอดับ
- * ขณะมี terminal session ทำงานอยู่
- *
- * ผูกจาก MainActivity: start เมื่อ session เริ่ม, stop เมื่อออกจากแอพถาวร
- */
 public class TerminalService extends Service {
 
     private static final String TAG = "TerminalService";
@@ -50,7 +45,12 @@ public class TerminalService extends Service {
                 .setOngoing(true)
                 .build();
 
-        startForeground(NOTIF_ID, n);
+        if (Build.VERSION.SDK_INT >= 34) {
+            startForeground(NOTIF_ID, n,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
+        } else {
+            startForeground(NOTIF_ID, n);
+        }
         Log.i(TAG, "foreground started");
         return START_STICKY;
     }
