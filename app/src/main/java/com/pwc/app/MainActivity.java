@@ -1,4 +1,3 @@
-app/src/main/java/com/pwc/app/MainActivity.java << 'ENDFILE'
 package com.pwc.app;
 
 import android.app.Activity;
@@ -18,7 +17,6 @@ import com.pwc.app.terminal.TerminalView;
 public class MainActivity extends Activity {
 
     private static final int BG = Color.parseColor("#0C0C0C");
-
     private TerminalSession session;
     private TerminalView terminalView;
 
@@ -44,9 +42,7 @@ public class MainActivity extends Activity {
         session.setListener(terminalView);
         tryAttachSession(terminalView, session);
 
-        if (!session.start(this)) {
-            // failed
-        } else {
+        if (session.start(this)) {
             try {
                 Intent fg = new Intent(this, TerminalService.class);
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -64,15 +60,12 @@ public class MainActivity extends Activity {
 
     private static void tryAttachSession(TerminalView view, TerminalSession session) {
         try {
-            view.getClass().getMethod("setSession", TerminalSession.class)
-                    .invoke(view, session);
-            return;
+            view.getClass().getMethod("setSession", TerminalSession.class).invoke(view, session);
         } catch (Throwable ignored) {
-        }
-        try {
-            view.getClass().getMethod("attachSession", TerminalSession.class)
-                    .invoke(view, session);
-        } catch (Throwable ignored) {
+            try {
+                view.getClass().getMethod("attachSession", TerminalSession.class).invoke(view, session);
+            } catch (Throwable ignored2) {
+            }
         }
     }
 
@@ -87,8 +80,7 @@ public class MainActivity extends Activity {
         if (Build.VERSION.SDK_INT >= 30) {
             w.setDecorFitsSystemWindows(true);
         } else {
-            View decor = w.getDecorView();
-            decor.setSystemUiVisibility(View.SYSTEM_UI_FLAG_LAYOUT_STABLE);
+            w.getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_LAYOUT_STABLE);
         }
     }
 
