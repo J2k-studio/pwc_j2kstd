@@ -22,11 +22,15 @@ import java.util.List;
  *
  * FHS-lite layout under getFilesDir():
  *   files/
- *   ├── usr/bin/          ← external commands (toybox later)
- *   ├── home/             ← $HOME  → prompt shows ~
- *   │   └── .local/bin/   ← pwc link target
+ *   ├── usr/bin/          ← external commands (after pwc setup / stage)
+ *   ├── home/             ← $HOME  → prompt shows \~
+ *   │   └── .local/bin/   ← pwc + toybox symlinks (first on PATH)
  *   ├── bin/              ← fallback only
  *   └── tmp/
+ *
+ * Env for pwc setup:
+ *   PWC_NATIVE_LIB = nativeLibraryDir  (libjsh.so / libpwc.so / libtoybox.so)
+ *   PWC_BIN        = codeCacheDir/bin  (runtime stage target)
  */
 public class TerminalSession {
 
@@ -83,17 +87,16 @@ public class TerminalSession {
 
         /* ── FHS-lite sandbox ─────────────────────────────────────── */
         File filesDir = context.getFilesDir();
-        File home    = mkdir(new File(filesDir, "home"));
+        File home     = mkdir(new File(filesDir, "home"));
         File localBin = mkdir(new File(home, ".local/bin"));
-        File usrBin  = mkdir(new File(filesDir, "usr/bin"));
-        File binDir  = mkdir(new File(filesDir, "bin"));
-        File tmp     = mkdir(new File(filesDir, "tmp"));
+        File usrBin   = mkdir(new File(filesDir, "usr/bin"));
+        File binDir   = mkdir(new File(filesDir, "bin"));
+        File tmp      = mkdir(new File(filesDir, "tmp"));
 
-        /* pwc must be executable — Android blocks exec from files/usr/bin
-         * (same EACCES as the old jsh path). Prefer nativeLibraryDir/libpwc.so
-         * and symlink it into ~/.local/bin/pwc which is first on PATH. */
         ApplicationInfo ai = context.getApplicationInfo();
         String nativeLibDir = ai.nativeLibraryDir;
+
+        /* pwc: libpwc.so → \~/.local/bin/pwc (exec from files/ is blocked) */
         File libPwc = nativeLibDir != null
                 ? new File(nativeLibDir, "libpwc.so") : null;
         File pwcLink = new File(localBin, "pwc");
@@ -108,7 +111,6 @@ public class TerminalSession {
                 Log.i(TAG, "pwc symlink " + pwcLink + " → " + libPwc);
             } catch (Throwable t) {
                 Log.w(TAG, "pwc symlink failed: " + t.getMessage());
-                /* last resort: still try assets extract (may be non-exec) */
                 copyAsset(context, "pwc", new File(usrBin, "pwc"));
             }
         } else {
@@ -119,10 +121,8 @@ public class TerminalSession {
             }
         }
 
-        /* HOME exact path (no trailing slash). PATH: local/bin first, then
-         * nativeLibraryDir (so libpwc.so is reachable), then usr/bin. */
+        /* PATH: \~/.local/bin → codeCache/bin → nativeLibraryDir → usr/bin → … */
         String homePath = home.getAbsolutePath();
-        /* Runtime bin (code_cache/bin) for downloaded executables */
         File runtimeBin = ExecRuntime.binDir(context);
         String path = ExecRuntime.pathPrefix(context)
                 + ":" + usrBin.getAbsolutePath()
@@ -135,6 +135,13 @@ public class TerminalSession {
         env.add("TMPDIR=" + tmp.getAbsolutePath());
         env.add("PWC_BIN=" + runtimeBin.getAbsolutePath());
         env.add("PATH=" + path);
+
+        /* pwc setup หา libtoybox.so จาก $PWC_NATIVE_LIB ก่อน */
+        if (nativeLibDir != null && !nativeLibDir.isEmpty()) {
+            env.add("PWC_NATIVE_LIB=" + nativeLibDir);
+            Log.i(TAG, "PWC_NATIVE_LIB=" + nativeLibDir);
+        }
+
         env.add("TERM=xterm-256color");
         env.add("LANG=en_US.UTF-8");
         env.add("USER=pwc");
