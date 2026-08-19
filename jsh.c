@@ -1041,6 +1041,29 @@ static int builtin_clear(void) {
     return 0;
 }
 
+
+/* 1 if executable `name` exists on $PATH (or as absolute path) */
+static int cmd_on_path(const char *name) {
+    if (name == NULL || name[0] == '\0') return 0;
+    if (strchr(name, '/') != NULL)
+        return access(name, X_OK) == 0;
+    const char *path_env = getenv("PATH");
+    if (path_env == NULL) return 0;
+    char *path_copy = strdup(path_env);
+    if (path_copy == NULL) return 0;
+    int found = 0;
+    for (char *dir = strtok(path_copy, ":"); dir != NULL; dir = strtok(NULL, ":")) {
+        char full[PATH_MAX];
+        snprintf(full, sizeof(full), "%s/%s", dir, name);
+        if (access(full, X_OK) == 0) {
+            found = 1;
+            break;
+        }
+    }
+    free(path_copy);
+    return found;
+}
+
 /* built-in: ls — simple directory listing (CMD-ish: name + type hint)
  * Usage: ls [path ...]
  * Shows directories with trailing / and notes empty dirs. */
@@ -1183,7 +1206,54 @@ static int builtin_help(char *argv[]) {
     return 0;
 }
 
-/* built-in: setup — bootstrap essentials + tip how to get pwc */
+/* Find libNAME.so: $PWC_NATIVE_LIB, PATH lib dirs, /proc/self/exe dir */
+static int find_native_lib(const char *soname, char *out, size_t out_size) {
+    const char *native = getenv("PWC_NATIVE_LIB");
+    if (native && native[0]) {
+        snprintf(out, out_size, "%s/%s", native, soname);
+        if (access(out, R_OK) == 0) return 0;
+    }
+    const char *path_env = getenv("PATH");
+    if (path_env) {
+        char *copy = strdup(path_env);
+        if (copy) {
+            for (char *dir = strtok(copy, ":"); dir; dir = strtok(NULL, ":")) {
+                if (strstr(dir, "/lib") == NULL)
+                    continue;
+                snprintf(out, out_size, "%s/%s", dir, soname);
+                if (access(out, R_OK) == 0) {
+                    free(copy);
+                    return 0;
+                }
+            }
+            free(copy);
+        }
+    }
+    char self[PATH_MAX];
+    ssize_t n = readlink("/proc/self/exe", self, sizeof(self) - 1);
+    if (n > 0) {
+        self[n] = '\0';
+        char *slash = strrchr(self, '/');
+        if (slash) {
+            *slash = '\0';
+            snprintf(out, out_size, "%s/%s", self, soname);
+            if (access(out, R_OK) == 0) return 0;
+        }
+    }
+    out[0] = '\0';
+    return 1;
+}
+
+static int link_one(const char *target, const char *linkpath) {
+    unlink(linkpath);
+    if (symlink(target, linkpath) != 0) {
+        fprintf(stderr, "  skip %s: %s\n", linkpath, strerror(errno));
+        return 1;
+    }
+    return 0;
+}
+
+/* built-in: setup — one command: FHS + pwc + toybox links */
 static int builtin_setup(char *argv[]) {
     (void)argv;
     const char *home = getenv("HOME");
@@ -1192,7 +1262,6 @@ static int builtin_setup(char *argv[]) {
     char local_bin[PATH_MAX], usr_bin[PATH_MAX], bin_dir[PATH_MAX], tmp_dir[PATH_MAX];
     snprintf(local_bin, sizeof(local_bin), "%s/.local/bin", home);
 
-    /* parent of HOME is filesDir */
     char files[PATH_MAX];
     snprintf(files, sizeof(files), "%s", home);
     char *slash = strrchr(files, '/');
@@ -1202,64 +1271,70 @@ static int builtin_setup(char *argv[]) {
     snprintf(bin_dir, sizeof(bin_dir), "%s/bin", files);
     snprintf(tmp_dir, sizeof(tmp_dir), "%s/tmp", files);
 
-    mkdir(local_bin, 0755);
-    mkdir(usr_bin, 0755);
-    mkdir(bin_dir, 0755);
-    mkdir(tmp_dir, 0755);
-    mkdir(home, 0755);
+    {
+        char local[PATH_MAX];
+        snprintf(local, sizeof(local), "%s/.local", home);
+        mkdir(home, 0755);
+        mkdir(local, 0755);
+        mkdir(local_bin, 0755);
+        mkdir(usr_bin, 0755);
+        mkdir(bin_dir, 0755);
+        mkdir(tmp_dir, 0755);
+    }
 
-    printf("\033[38;2;78;201;176m[setup]\033[0m FHS directories ready:\n");
-    printf("  HOME     %s\n", home);
+    printf("\033[38;2;78;201;176m[setup]\033[0m FHS ready\n");
+    printf("  HOME      %s\n", home);
     printf("  local/bin %s\n", local_bin);
-    printf("  usr/bin  %s\n", usr_bin);
-    printf("  bin      %s\n", bin_dir);
-    printf("  tmp      %s\n", tmp_dir);
-    printf("\n");
 
-    /* look for pwc already on PATH or next to common places */
-    char pwc_path[PATH_MAX];
-    int found = 0;
-    const char *candidates[] = {
-        NULL, /* filled below with local_bin/pwc */
-        NULL,
-        "/system/bin/pwc",
+    char libpwc[PATH_MAX];
+    char pwc_link[PATH_MAX];
+    snprintf(pwc_link, sizeof(pwc_link), "%s/pwc", local_bin);
+
+    if (find_native_lib("libpwc.so", libpwc, sizeof(libpwc)) == 0) {
+        if (link_one(libpwc, pwc_link) == 0)
+            printf("\033[38;2;78;201;176m[setup]\033[0m pwc -> %s\n", libpwc);
+        else
+            printf("\033[38;2;220;160;80m[setup]\033[0m pwc link failed\n");
+    } else {
+        printf("\033[38;2;220;160;80m[setup]\033[0m libpwc.so not found\n");
+    }
+
+    static const char *TOYBOX_LINKS[] = {
+        "ls", "cp", "mv", "rm", "mkdir", "rmdir", "cat", "echo",
+        "pwd", "touch", "chmod", "chown", "ln", "stat", "df", "du",
+        "ps", "kill", "sleep", "head", "tail", "wc", "grep", "find",
+        "xargs", "sort", "uniq", "cut", "tr", "basename", "dirname",
+        "realpath", "which", "id", "whoami", "uname", "date", "true",
+        "false", "test", "[", "env", "printenv", "clear", "seq",
+        "tar", "gzip", "gunzip", "base64", "md5sum", "sha256sum",
+        "ifconfig", "netstat", "ping", "toybox",
         NULL
     };
-    snprintf(pwc_path, sizeof(pwc_path), "%s/pwc", local_bin);
-    candidates[0] = pwc_path;
-    char usr_pwc[PATH_MAX];
-    snprintf(usr_pwc, sizeof(usr_pwc), "%s/pwc", usr_bin);
-    candidates[1] = usr_pwc;
 
-    for (int i = 0; candidates[i] != NULL; i++) {
-        if (access(candidates[i], X_OK) == 0) {
-            printf("\033[38;2;78;201;176m[setup]\033[0m found pwc: %s\n", candidates[i]);
-            found = 1;
-            break;
+    char libtoy[PATH_MAX];
+    int ok = 0, fail = 0;
+    if (find_native_lib("libtoybox.so", libtoy, sizeof(libtoy)) == 0) {
+        printf("\033[38;2;78;201;176m[setup]\033[0m toybox -> %s\n", libtoy);
+        for (int i = 0; TOYBOX_LINKS[i] != NULL; i++) {
+            char linkpath[PATH_MAX];
+            snprintf(linkpath, sizeof(linkpath), "%s/%s", local_bin, TOYBOX_LINKS[i]);
+            if (link_one(libtoy, linkpath) == 0) ok++;
+            else fail++;
         }
-    }
-
-    if (!found) {
-        printf("\033[38;2;220;160;80m[setup]\033[0m pwc not installed yet.\n");
-        printf("\n");
-        printf("How to get pwc into this shell:\n");
-        printf("  1) On Termux build host, compile pwc and push into the app:\n");
-        printf("       cp pwc /data/data/com.pwc.app/files/usr/bin/\n");
-        printf("     (or use adb / storage + install path)\n");
-        printf("  2) Or from this shell after you copy the binary here:\n");
-        printf("       cp /sdcard/pwc ~/../usr/bin/\n");
-        printf("       chmod 755 ~/../usr/bin/pwc\n");
-        printf("  3) Then:  pwc link  /  pwc setup  (toybox later)\n");
-        printf("\n");
-        printf("Until toybox is installed, use jsh builtins:\n");
-        printf("  ls  mkdir  rmdir  cd  pwd  clear  history  help  setup\n");
+        printf("\033[38;2;78;201;176m[setup]\033[0m links: %d ok, %d failed\n", ok, fail);
     } else {
-        printf("\nTry:  pwc help   or   pwc link <file>\n");
+        printf("\033[38;2;220;160;80m[setup]\033[0m libtoybox.so not found\n");
     }
 
-    printf("\nTip: from a subfolder of ~ use  cd ../../bin  to reach files/bin\n");
-    return 0;
+    printf("\n");
+    if (access(pwc_link, X_OK) == 0)
+        printf("Try:  pwc   ls -la   which ls   toybox\n");
+    else
+        printf("Try:  setup again after rebuild APK with libpwc.so + libtoybox.so\n");
+
+    return (ok > 0 || access(pwc_link, X_OK) == 0) ? 0 : 1;
 }
+
 
 /* built-in: history — list in-memory history (most recent at the bottom) */
 static int builtin_history(void) {
@@ -2572,19 +2647,27 @@ static int dispatch_single(char *line) {
             return 0;
         }
 
+        /* Prefer external on PATH (toybox after pwc setup); else builtin */
         if (strcmp(argv[0], "ls") == 0) {
-            g_last_status = builtin_ls(argv);
-            return 0;
+            if (!cmd_on_path("ls")) {
+                g_last_status = builtin_ls(argv);
+                return 0;
+            }
+            /* fall through -> run_pipeline / execvp */
         }
 
         if (strcmp(argv[0], "mkdir") == 0) {
-            g_last_status = builtin_mkdir(argv);
-            return 0;
+            if (!cmd_on_path("mkdir")) {
+                g_last_status = builtin_mkdir(argv);
+                return 0;
+            }
         }
 
         if (strcmp(argv[0], "rmdir") == 0) {
-            g_last_status = builtin_rmdir(argv);
-            return 0;
+            if (!cmd_on_path("rmdir")) {
+                g_last_status = builtin_rmdir(argv);
+                return 0;
+            }
         }
 
         if (strcmp(argv[0], "help") == 0) {
